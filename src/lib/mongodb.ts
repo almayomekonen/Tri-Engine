@@ -57,6 +57,42 @@ export default dbConnect;
 
 import { Schema, model, models } from "mongoose";
 
+// Analysis Session interface and model for streaming analysis
+interface IAnalysisSession {
+  sessionId: string;
+  prompt: string;
+  progress: number;
+  chatgptContent: string;
+  geminiContent: string;
+  isComplete: boolean;
+  businessName: string;
+  createdAt: Date;
+  expiresAt: Date;
+}
+
+const AnalysisSessionSchema = new Schema<IAnalysisSession>(
+  {
+    sessionId: { type: String, required: true, unique: true },
+    prompt: { type: String, required: true },
+    progress: { type: Number, default: 0 },
+    chatgptContent: { type: String, default: "" },
+    geminiContent: { type: String, default: "" },
+    isComplete: { type: Boolean, default: false },
+    businessName: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now },
+    expiresAt: { type: Date, required: true },
+  },
+  { timestamps: true }
+);
+
+// Add index for faster lookup and automatic expiration
+AnalysisSessionSchema.index({ createdAt: 1 });
+AnalysisSessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+const AnalysisSession =
+  models.AnalysisSession ||
+  model<IAnalysisSession>("AnalysisSession", AnalysisSessionSchema);
+
 interface IQuestionResponse {
   selected: boolean;
   answer: string | null;
@@ -235,5 +271,11 @@ VentureSchema.virtual("progressPercentage").get(function () {
 
 const Venture = models.Venture || model<IVenture>("Venture", VentureSchema);
 
-export { Venture };
-export type { IVenture, IAIResult, IScoring, IQuestionResponse };
+export { Venture, AnalysisSession };
+export type {
+  IVenture,
+  IAIResult,
+  IScoring,
+  IQuestionResponse,
+  IAnalysisSession,
+};

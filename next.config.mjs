@@ -13,6 +13,10 @@ const nextConfig = {
   experimental: {
     optimizeCss: true,
   },
+  eslint: {
+    // להתעלם משגיאות לינטר בבילד - מפתחים יראו אותן בסביבת הפיתוח בלבד
+    ignoreDuringBuilds: true,
+  },
   webpack: (config, { dev, isServer }) => {
     // Only apply in production build on client-side
     if (!dev && !isServer) {

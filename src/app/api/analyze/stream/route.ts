@@ -1,42 +1,24 @@
 import { NextRequest } from "next/server";
 import { buildDetailedAnalysisPrompt } from "../utils";
 import { DetailedAnalysisResult } from "@/types";
+import {
+  createSession,
+  getSession,
+  updateSession,
+  validateSession,
+} from "@/lib/sessionService";
 
-// Define the session interface
-interface AnalysisSession {
-  prompt: string;
-  progress: number;
-  chatgptContent: string;
-  geminiContent: string;
-  isComplete: boolean;
-  businessName: string;
-  createdAt: Date;
-}
+// Define the session interface in mongodb.ts now
 
-// Store active analysis sessions
-const ACTIVE_SESSIONS = new Map<string, AnalysisSession>();
+// No need for active sessions map anymore as we use MongoDB
+// const ACTIVE_SESSIONS = new Map<string, AnalysisSession>();
 
-// Clean up sessions older than 30 minutes
-function cleanupOldSessions() {
-  const now = new Date();
-  ACTIVE_SESSIONS.forEach((session, id) => {
-    const sessionAge = now.getTime() - session.createdAt.getTime();
-    // If session is older than 30 minutes (1800000 ms), remove it
-    if (sessionAge > 1800000) {
-      ACTIVE_SESSIONS.delete(id);
-      console.log(`Cleaned up expired session: ${id}`);
-    }
-  });
-}
+// No need for cleanup as MongoDB TTL index handles it automatically
+// function cleanupOldSessions() {...}
+// setInterval(cleanupOldSessions, 300000);
 
-// Run cleanup every 5 minutes
-setInterval(cleanupOldSessions, 300000);
-
-// Helper function to validate session ID
-function validateSession(sessionId: string | null): boolean {
-  if (!sessionId) return false;
-  return ACTIVE_SESSIONS.has(sessionId);
-}
+// Helper function now uses MongoDB
+// function validateSession(sessionId: string | null): boolean {...}
 
 // Handle different HTTP methods
 export async function POST(request: NextRequest) {
@@ -51,19 +33,15 @@ export async function POST(request: NextRequest) {
       businessName: data.businessName || "My Business",
     });
 
-    // Store session with creation timestamp
-    ACTIVE_SESSIONS.set(sessionId, {
+    // Create session in MongoDB
+    await createSession({
+      sessionId,
       prompt,
-      progress: 0,
-      chatgptContent: "",
-      geminiContent: "",
-      isComplete: false,
       businessName: data.businessName || "My Business",
-      createdAt: new Date(),
     });
 
     // Begin analysis in the background
-    startAnalysis(sessionId);
+    startAnalysis(sessionId, prompt);
 
     // Return the session ID
     return new Response(JSON.stringify({ sessionId }), {
@@ -89,8 +67,10 @@ export async function HEAD(request: NextRequest) {
 
     console.log(`HEAD request received for sessionId: ${sessionId}`);
 
-    // Check if the session exists
-    if (!validateSession(sessionId)) {
+    // Check if the session exists in MongoDB
+    const isValid = await validateSession(sessionId);
+
+    if (!isValid) {
       console.log(`HEAD: Invalid session ID: ${sessionId}`);
       return new Response(null, {
         status: 400,
@@ -126,8 +106,8 @@ export async function GET(request: NextRequest) {
 
     console.log(`GET stream request for sessionId: ${sessionId}`);
 
-    // Validate the session ID
-    if (!sessionId || !ACTIVE_SESSIONS.has(sessionId)) {
+    // Validate the session ID using MongoDB
+    if (!sessionId) {
       console.log(`Invalid or missing sessionId: ${sessionId}`);
       return new Response("Event stream requires a valid sessionId", {
         status: 400,
@@ -138,8 +118,20 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Get the session (we've validated it exists)
-    const session = ACTIVE_SESSIONS.get(sessionId)!;
+    // Get the session from MongoDB
+    const session = await getSession(sessionId);
+
+    if (!session) {
+      console.log(`Session not found for ID: ${sessionId}`);
+      return new Response("Session not found or expired", {
+        status: 400,
+        headers: {
+          "Cache-Control": "no-store, must-revalidate",
+          "Content-Type": "text/plain",
+        },
+      });
+    }
+
     console.log(
       `Valid session found for: ${sessionId}, progress: ${session.progress}`
     );
@@ -147,6 +139,9 @@ export async function GET(request: NextRequest) {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       start(controller) {
+        // דגל לסימון האם ה-controller פעיל
+        let isControllerActive = true;
+
         // Send initial status
         controller.enqueue(
           encoder.encode(
@@ -259,172 +254,263 @@ export async function GET(request: NextRequest) {
           );
 
           // And close the stream
-          ACTIVE_SESSIONS.delete(sessionId);
+          // No need to delete from Map, but we'll add a session expiry in MongoDB
           controller.close();
           return;
         }
 
-        // Set up interval to check for updates
-        const interval = setInterval(() => {
-          // Check if session still exists
-          if (!ACTIVE_SESSIONS.has(sessionId)) {
+        // Set up interval to check for updates from MongoDB
+        const interval = setInterval(async () => {
+          // בדיקה אם ה-controller עדיין פעיל
+          if (!isControllerActive) {
             clearInterval(interval);
-            controller.close();
             return;
           }
 
-          const updatedSession = ACTIVE_SESSIONS.get(sessionId)!;
+          try {
+            // Check if session still exists in MongoDB
+            const updatedSession = await getSession(sessionId);
 
-          // Keep track of local session state to detect changes
-          const sessionState = {
-            progress: session.progress,
-            chatgptContent: session.chatgptContent,
-            geminiContent: session.geminiContent,
-            isComplete: session.isComplete,
-          };
+            if (!updatedSession) {
+              console.log(
+                `Session ${sessionId} no longer exists, closing stream`
+              );
+              clearInterval(interval);
 
-          // Check for progress changes
-          const progressChanged =
-            updatedSession.progress !== sessionState.progress;
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "error",
+                      error: "Session expired or not found",
+                    })}\n\n`
+                  )
+                );
+                controller.close();
+              } catch (err) {
+                console.log(
+                  "Controller already closed, can't send error message",
+                  err
+                );
+              }
 
-          // Check for new ChatGPT content
-          if (updatedSession.progress >= 10 && sessionState.progress < 10) {
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "chatgpt_start",
-                  message: "מתחיל ניתוח ChatGPT...",
-                })}\n\n`
-              )
-            );
-          }
+              isControllerActive = false;
+              return;
+            }
 
-          // Send current state if ChatGPT content changed
-          if (updatedSession.chatgptContent !== sessionState.chatgptContent) {
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "chatgpt_chunk",
-                  content: updatedSession.chatgptContent,
-                  progress: Math.min(50, updatedSession.progress),
-                })}\n\n`
-              )
-            );
-          }
-
-          // Send chatgpt_complete if we're at 50% but weren't before
-          if (
-            updatedSession.progress >= 50 &&
-            sessionState.progress < 50 &&
-            updatedSession.chatgptContent
-          ) {
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "chatgpt_complete",
-                  content: updatedSession.chatgptContent,
-                  progress: 50,
-                })}\n\n`
-              )
-            );
-
-            // Also send gemini_start event
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "gemini_start",
-                  message: "מתחיל ניתוח Gemini...",
-                })}\n\n`
-              )
-            );
-          }
-
-          // Send current state if Gemini content changed
-          if (updatedSession.geminiContent !== sessionState.geminiContent) {
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "gemini_chunk",
-                  content: updatedSession.geminiContent,
-                  progress: Math.min(95, 50 + updatedSession.progress / 2),
-                })}\n\n`
-              )
-            );
-          }
-
-          // Send gemini_complete if we're at 95% but weren't before
-          if (
-            updatedSession.progress >= 95 &&
-            sessionState.progress < 95 &&
-            updatedSession.geminiContent
-          ) {
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "gemini_complete",
-                  content: updatedSession.geminiContent,
-                  progress: 95,
-                })}\n\n`
-              )
-            );
-          }
-
-          // Send general progress update if it changed
-          if (progressChanged) {
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "status",
-                  message:
-                    updatedSession.progress >= 50
-                      ? "Gemini מנתח את המיזם..."
-                      : "ChatGPT מנתח את המיזם...",
-                  progress: updatedSession.progress,
-                })}\n\n`
-              )
-            );
-          }
-
-          // Check if analysis is complete
-          if (updatedSession.isComplete && !sessionState.isComplete) {
-            // Create a result object to send back
-            const result: DetailedAnalysisResult = {
-              ventureId: sessionId,
-              score: 75, // Default score - can be calculated based on analysis
-              maxScore: 105,
-              progressPercentage: 100,
-              results: {
-                chatgpt: updatedSession.chatgptContent,
-                gemini: updatedSession.geminiContent,
-              },
-              comprehensive: "ניתוח מקיף משולב יתווסף בעתיד",
-              savedAt: new Date(),
+            // Keep track of local session state to detect changes
+            const sessionState = {
+              progress: session.progress,
+              chatgptContent: session.chatgptContent,
+              geminiContent: session.geminiContent,
+              isComplete: session.isComplete,
             };
 
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({
-                  type: "complete",
-                  progress: 100,
-                  result: result,
-                })}\n\n`
-              )
-            );
+            // Check for progress changes
+            const progressChanged =
+              updatedSession.progress !== sessionState.progress;
 
-            // Clean up
-            clearInterval(interval);
-            ACTIVE_SESSIONS.delete(sessionId);
-            controller.close();
+            // Check for new ChatGPT content
+            if (updatedSession.progress >= 10 && sessionState.progress < 10) {
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "chatgpt_start",
+                      message: "מתחיל ניתוח ChatGPT...",
+                    })}\n\n`
+                  )
+                );
+              } catch (error: unknown) {
+                console.error(
+                  "Error sending chatgpt_start:",
+                  error instanceof Error ? error.message : "Unknown error"
+                );
+                isControllerActive = false;
+                clearInterval(interval);
+                return;
+              }
+            }
+
+            // Check for ChatGPT content changes
+            const chatgptContentChanged =
+              updatedSession.chatgptContent !== sessionState.chatgptContent;
+
+            if (chatgptContentChanged && isControllerActive) {
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "chatgpt_chunk",
+                      content: updatedSession.chatgptContent,
+                      progress: Math.min(50, updatedSession.progress),
+                    })}\n\n`
+                  )
+                );
+
+                // Update local copy
+                session.chatgptContent = updatedSession.chatgptContent;
+              } catch (error: unknown) {
+                console.error(
+                  "Error sending chatgpt_chunk:",
+                  error instanceof Error ? error.message : "Unknown error"
+                );
+                isControllerActive = false;
+                clearInterval(interval);
+                return;
+              }
+            }
+
+            // Check for ChatGPT completion
+            if (updatedSession.progress >= 50 && sessionState.progress < 50) {
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "chatgpt_complete",
+                      content: updatedSession.chatgptContent,
+                      progress: 50,
+                    })}\n\n`
+                  )
+                );
+
+                // Also send Gemini start
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "gemini_start",
+                      message: "מתחיל ניתוח Gemini...",
+                    })}\n\n`
+                  )
+                );
+              } catch (error: unknown) {
+                console.error(
+                  "Error sending chatgpt_complete:",
+                  error instanceof Error ? error.message : "Unknown error"
+                );
+                isControllerActive = false;
+                clearInterval(interval);
+                return;
+              }
+            }
+
+            // Check for Gemini content changes
+            const geminiContentChanged =
+              updatedSession.geminiContent !== sessionState.geminiContent;
+
+            if (geminiContentChanged && isControllerActive) {
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "gemini_chunk",
+                      content: updatedSession.geminiContent,
+                      progress: Math.min(95, 50 + updatedSession.progress / 2),
+                    })}\n\n`
+                  )
+                );
+
+                // Update local copy
+                session.geminiContent = updatedSession.geminiContent;
+              } catch (err) {
+                console.error("Error sending gemini_chunk:", err);
+                isControllerActive = false;
+                clearInterval(interval);
+                return;
+              }
+            }
+
+            // Check for completion
+            if (updatedSession.isComplete && !sessionState.isComplete) {
+              // Send gemini_complete event
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "gemini_complete",
+                      content: updatedSession.geminiContent,
+                      progress: 95,
+                    })}\n\n`
+                  )
+                );
+
+                // Create a result object to send back
+                const result: DetailedAnalysisResult = {
+                  ventureId: sessionId,
+                  score: 75, // Default score - can be calculated based on analysis
+                  maxScore: 105,
+                  progressPercentage: 100,
+                  results: {
+                    chatgpt: updatedSession.chatgptContent,
+                    gemini: updatedSession.geminiContent,
+                  },
+                  comprehensive: "ניתוח מקיף משולב יתווסף בעתיד",
+                  savedAt: new Date(),
+                };
+
+                // Send complete event
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "complete",
+                      progress: 100,
+                      result: result,
+                    })}\n\n`
+                  )
+                );
+              } catch (err) {
+                console.error("Error sending gemini_complete:", err);
+                isControllerActive = false;
+                clearInterval(interval);
+                return;
+              }
+            }
+
+            // Update progress
+            if (progressChanged && isControllerActive) {
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "status",
+                      progress: updatedSession.progress,
+                    })}\n\n`
+                  )
+                );
+
+                // Update local copy
+                session.progress = updatedSession.progress;
+              } catch (err) {
+                console.error("Error sending progress update:", err);
+                isControllerActive = false;
+                clearInterval(interval);
+                return;
+              }
+            }
+
+            // Update isComplete
+            if (updatedSession.isComplete !== sessionState.isComplete) {
+              session.isComplete = updatedSession.isComplete;
+            }
+          } catch (error) {
+            console.error("Error checking for session updates:", error);
+            // Don't close the stream, just log the error and continue
           }
+        }, 1000);
 
-          // Update our local session reference with the current values
-          Object.assign(session, updatedSession);
-        }, 1000); // Check for updates every second
-
-        // Handle client disconnect
+        // Clean up on stream close
         request.signal.addEventListener("abort", () => {
+          console.log(
+            `Client disconnected from stream for session: ${sessionId}`
+          );
+          isControllerActive = false;
           clearInterval(interval);
         });
+
+        return () => {
+          isControllerActive = false;
+          clearInterval(interval);
+        };
       },
     });
 
@@ -454,140 +540,70 @@ export async function GET(request: NextRequest) {
   }
 }
 
-async function startAnalysis(sessionId: string) {
-  const session = ACTIVE_SESSIONS.get(sessionId);
-  if (!session) return;
+// Start the analysis process
+async function startAnalysis(sessionId: string, prompt: string) {
+  console.log(`Starting analysis for session: ${sessionId}`);
 
   try {
-    // Start ChatGPT Analysis - update progress incrementally
-    ACTIVE_SESSIONS.set(sessionId, {
-      ...session,
-      progress: 5,
-    });
+    // Update progress to 5%
+    await updateSession(sessionId, { progress: 5 });
 
-    // Add a small delay to simulate processing
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    // Start ChatGPT analysis
+    await updateSession(sessionId, { progress: 10 });
+    console.log(`ChatGPT analysis started for session: ${sessionId}`);
 
-    // Update to 10% - ChatGPT starting
-    if (!ACTIVE_SESSIONS.has(sessionId)) return; // Session was deleted
-    ACTIVE_SESSIONS.set(sessionId, {
-      ...ACTIVE_SESSIONS.get(sessionId)!,
-      progress: 10,
-    });
+    // Run ChatGPT analysis
+    const chatgptResult = await runChatGPTAnalysis(prompt);
 
-    // Small delay
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    // Update to 20% - ChatGPT in progress
-    if (!ACTIVE_SESSIONS.has(sessionId)) return; // Session was deleted
-    ACTIVE_SESSIONS.set(sessionId, {
-      ...ACTIVE_SESSIONS.get(sessionId)!,
-      progress: 20,
-    });
-
-    // Simulate getting partial ChatGPT results
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-
-    // Update to 30% with initial content
-    if (!ACTIVE_SESSIONS.has(sessionId)) return; // Session was deleted
-    ACTIVE_SESSIONS.set(sessionId, {
-      ...ACTIVE_SESSIONS.get(sessionId)!,
-      chatgptContent: "מנתח את המיזם... התוצאות יופיעו בקרוב.",
-      progress: 30,
-    });
-
-    // Simulate more ChatGPT progress
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-
-    // Run the actual ChatGPT analysis
-    let chatgptResult = "";
-    try {
-      chatgptResult = await runChatGPTAnalysis(session.prompt);
-    } catch (e) {
-      console.error("Error in ChatGPT analysis:", e);
-      chatgptResult = "שגיאה בניתוח ChatGPT. נסה שוב מאוחר יותר.";
-    }
-
-    if (!ACTIVE_SESSIONS.has(sessionId)) return; // Session was deleted
-
-    // ChatGPT complete
-    ACTIVE_SESSIONS.set(sessionId, {
-      ...ACTIVE_SESSIONS.get(sessionId)!,
-      chatgptContent: chatgptResult,
+    // Update progress and store the ChatGPT result
+    await updateSession(sessionId, {
       progress: 50,
+      chatgptContent: chatgptResult,
     });
+    console.log(`ChatGPT analysis completed for session: ${sessionId}`);
 
-    // Small delay before starting Gemini
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    // Start Gemini analysis
+    console.log(`Gemini analysis started for session: ${sessionId}`);
 
-    // Update to 60% - Gemini in progress
-    if (!ACTIVE_SESSIONS.has(sessionId)) return; // Session was deleted
-    ACTIVE_SESSIONS.set(sessionId, {
-      ...ACTIVE_SESSIONS.get(sessionId)!,
-      progress: 60,
-    });
+    // Run Gemini analysis
+    const geminiResult = await runGeminiAnalysis(prompt);
 
-    // Simulate getting partial Gemini results
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-
-    // Update to 70% with initial Gemini content
-    if (!ACTIVE_SESSIONS.has(sessionId)) return; // Session was deleted
-    ACTIVE_SESSIONS.set(sessionId, {
-      ...ACTIVE_SESSIONS.get(sessionId)!,
-      geminiContent: "מנתח את המיזם באמצעות Gemini... התוצאות יופיעו בקרוב.",
-      progress: 70,
-    });
-
-    // Simulate more Gemini progress
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-
-    // Run the actual Gemini analysis
-    let geminiResult = "";
-    try {
-      geminiResult = await runGeminiAnalysis(session.prompt);
-    } catch (e) {
-      console.error("Error in Gemini analysis:", e);
-      geminiResult = "שגיאה בניתוח Gemini. נסה שוב מאוחר יותר.";
-    }
-
-    if (!ACTIVE_SESSIONS.has(sessionId)) return; // Session was deleted
-
-    // Gemini almost complete
-    ACTIVE_SESSIONS.set(sessionId, {
-      ...ACTIVE_SESSIONS.get(sessionId)!,
-      geminiContent: geminiResult,
-      progress: 95,
-    });
-
-    // Small delay before finalizing
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    // Complete the analysis
-    if (!ACTIVE_SESSIONS.has(sessionId)) return; // Session was deleted
-    ACTIVE_SESSIONS.set(sessionId, {
-      ...ACTIVE_SESSIONS.get(sessionId)!,
+    // Update progress, store the Gemini result, and mark as complete
+    await updateSession(sessionId, {
       progress: 100,
+      geminiContent: geminiResult,
       isComplete: true,
     });
+    console.log(`Gemini analysis completed for session: ${sessionId}`);
+    console.log(`Analysis complete for session: ${sessionId}`);
   } catch (error) {
-    console.error("Analysis error:", error);
+    console.error(`Error in analysis for session ${sessionId}:`, error);
 
-    if (ACTIVE_SESSIONS.has(sessionId)) {
-      const currentSession = ACTIVE_SESSIONS.get(sessionId)!;
-
-      // Make sure we have at least some content if there was an error
-      const chatgptContent =
-        currentSession.chatgptContent || "שגיאה בניתוח, אין תוכן";
-      const geminiContent =
-        currentSession.geminiContent || "שגיאה בניתוח, אין תוכן";
-
-      ACTIVE_SESSIONS.set(sessionId, {
-        ...currentSession,
-        chatgptContent,
-        geminiContent,
+    // Make sure to store partial results if we have them
+    const session = await getSession(sessionId);
+    if (session) {
+      const updates: {
+        progress: number;
+        isComplete: boolean;
+        chatgptContent?: string;
+        geminiContent?: string;
+      } = {
         progress: 100,
         isComplete: true,
-      });
+      };
+
+      // Use placeholder content for failed engines
+      if (!session.chatgptContent) {
+        updates.chatgptContent =
+          "לא ניתן היה להשלים את הניתוח. אנא נסה שוב מאוחר יותר.";
+      }
+
+      if (!session.geminiContent) {
+        updates.geminiContent =
+          "לא ניתן היה להשלים את הניתוח. אנא נסה שוב מאוחר יותר.";
+      }
+
+      await updateSession(sessionId, updates);
     }
   }
 }

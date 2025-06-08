@@ -172,11 +172,12 @@ export default function StreamingAnalysisModal({
         `/api/analyze/stream?sessionId=${sessionId}`,
         {
           method: "HEAD",
+          cache: "no-store",
         }
       );
 
       if (!checkResponse.ok) {
-        throw new Error("Invalid or expired session");
+        throw new Error("Session has expired or is invalid");
       }
 
       // Set up the EventSource for streaming updates
@@ -245,6 +246,7 @@ export default function StreamingAnalysisModal({
 
     startStreaming();
 
+    // Set a global timeout for the whole analysis process
     timeoutRef.current = setTimeout(() => {
       if (!isComplete && !hasError) {
         setHasError(true);
@@ -253,7 +255,7 @@ export default function StreamingAnalysisModal({
           eventSourceRef.current.close();
         }
       }
-    }, 180000);
+    }, 180000); // 3 minutes max for the entire analysis
 
     return () => {
       if (eventSourceRef.current) {
