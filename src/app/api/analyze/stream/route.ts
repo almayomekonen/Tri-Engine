@@ -87,22 +87,34 @@ export async function HEAD(request: NextRequest) {
     const url = new URL(request.url);
     const sessionId = url.searchParams.get("sessionId");
 
+    console.log(`HEAD request received for sessionId: ${sessionId}`);
+
     // Check if the session exists
     if (!validateSession(sessionId)) {
       console.log(`HEAD: Invalid session ID: ${sessionId}`);
       return new Response(null, {
         status: 400,
+        headers: {
+          "Cache-Control": "no-store, must-revalidate",
+        },
       });
     }
 
     // Session is valid
+    console.log(`HEAD: Valid session ID: ${sessionId}`);
     return new Response(null, {
       status: 200,
+      headers: {
+        "Cache-Control": "no-store, must-revalidate",
+      },
     });
   } catch (error) {
     console.error("Error in HEAD request:", error);
     return new Response(null, {
       status: 500,
+      headers: {
+        "Cache-Control": "no-store, must-revalidate",
+      },
     });
   }
 }
@@ -112,15 +124,25 @@ export async function GET(request: NextRequest) {
     const url = new URL(request.url);
     const sessionId = url.searchParams.get("sessionId");
 
+    console.log(`GET stream request for sessionId: ${sessionId}`);
+
     // Validate the session ID
     if (!sessionId || !ACTIVE_SESSIONS.has(sessionId)) {
+      console.log(`Invalid or missing sessionId: ${sessionId}`);
       return new Response("Event stream requires a valid sessionId", {
         status: 400,
+        headers: {
+          "Cache-Control": "no-store, must-revalidate",
+          "Content-Type": "text/plain",
+        },
       });
     }
 
     // Get the session (we've validated it exists)
     const session = ACTIVE_SESSIONS.get(sessionId)!;
+    console.log(
+      `Valid session found for: ${sessionId}, progress: ${session.progress}`
+    );
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -409,19 +431,26 @@ export async function GET(request: NextRequest) {
     return new Response(stream, {
       headers: {
         "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache, no-transform",
+        "Cache-Control": "no-cache, no-transform, no-store, must-revalidate",
         Connection: "keep-alive",
         "X-Accel-Buffering": "no",
       },
     });
   } catch (error) {
     console.error("Error in GET stream:", error);
-    return new Response(JSON.stringify({ error: "Stream error" }), {
-      status: 500,
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
+    return new Response(
+      JSON.stringify({
+        error: "Server error processing event stream",
+        message: error instanceof Error ? error.message : "Unknown error",
+      }),
+      {
+        status: 500,
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store, must-revalidate",
+        },
+      }
+    );
   }
 }
 

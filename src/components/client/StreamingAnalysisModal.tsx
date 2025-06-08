@@ -167,6 +167,18 @@ export default function StreamingAnalysisModal({
         throw new Error("No session ID provided");
       }
 
+      // First perform a HEAD request to check if the session is valid
+      const checkResponse = await fetch(
+        `/api/analyze/stream?sessionId=${sessionId}`,
+        {
+          method: "HEAD",
+        }
+      );
+
+      if (!checkResponse.ok) {
+        throw new Error("Invalid or expired session");
+      }
+
       // Set up the EventSource for streaming updates
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
@@ -175,12 +187,16 @@ export default function StreamingAnalysisModal({
       // Create EventSource with special URL parameter to prevent caching
       const url = `/api/analyze/stream?sessionId=${sessionId}&_=${Date.now()}`;
 
-      // Create EventSource with EventSource.NONE for error handling
+      // Create EventSource
       const eventSource = new EventSource(url);
       eventSourceRef.current = eventSource;
 
+      let reconnectAttempts = 0;
+      const MAX_RECONNECT_ATTEMPTS = 3;
+
       eventSource.onmessage = (event) => {
         try {
+          reconnectAttempts = 0; // Reset reconnect attempts on successful message
           const data: StreamingData = JSON.parse(event.data);
           handleStreamData(data);
         } catch (e) {
@@ -190,11 +206,16 @@ export default function StreamingAnalysisModal({
 
       eventSource.onerror = (error) => {
         console.error("EventSource error:", error);
+        reconnectAttempts++;
 
-        // Close the connection and don't try to reconnect
-        eventSource.close();
-        setHasError(true);
-        setStatus("שגיאה בחיבור לשירות הניתוח. המערכת לא תנסה להתחבר מחדש.");
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+          // Close the connection and don't try to reconnect after max attempts
+          eventSource.close();
+          setHasError(true);
+          setStatus(
+            "שגיאה בחיבור לשירות הניתוח לאחר מספר ניסיונות. אנא נסה שוב מאוחר יותר."
+          );
+        }
       };
     } catch (error) {
       console.error("Streaming error:", error);
