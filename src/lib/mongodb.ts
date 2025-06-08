@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
+import crypto from "crypto";
 
-const MONGODB_URI = process.env.MONGODB_URI!;
+const MONGODB_URI = process.env.MONGODB_URI as string;
 
 if (!MONGODB_URI) {
   throw new Error(
@@ -279,3 +280,101 @@ export type {
   IQuestionResponse,
   IAnalysisSession,
 };
+
+/**
+ * יוצר סשן חדש במסד הנתונים
+ */
+export async function createSession(data: {
+  prompt: string;
+  businessName: string;
+  progress: number;
+  isComplete: boolean;
+  createdAt: Date;
+}): Promise<string> {
+  try {
+    await connectToDatabase();
+
+    const sessionId = crypto.randomUUID();
+
+    // יצירת תאריך תפוגה - 24 שעות מעכשיו
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + 24);
+
+    const session = new AnalysisSession({
+      sessionId,
+      ...data,
+      expiresAt, // הוספת שדה התפוגה הנדרש
+    });
+
+    await session.save();
+    return sessionId;
+  } catch (error) {
+    console.error("Error creating session:", error);
+    throw new Error("Failed to create session in database");
+  }
+}
+
+/**
+ * מעדכן סשן קיים
+ */
+export async function updateSession(
+  sessionId: string,
+  updates: Partial<{
+    progress: number;
+    chatgptContent: string;
+    geminiContent: string;
+    isComplete: boolean;
+  }>
+): Promise<boolean> {
+  try {
+    await connectToDatabase();
+
+    const result = await AnalysisSession.updateOne(
+      { sessionId },
+      { $set: updates }
+    );
+
+    return result.modifiedCount > 0;
+  } catch (error) {
+    console.error(`Error updating session ${sessionId}:`, error);
+    throw new Error("Failed to update session in database");
+  }
+}
+
+/**
+ * מחזיר את נתוני הסשן לפי מזהה
+ */
+export async function getSession(
+  sessionId: string
+): Promise<IAnalysisSession | null> {
+  try {
+    await connectToDatabase();
+    return await AnalysisSession.findOne({ sessionId });
+  } catch (error) {
+    console.error(`Error getting session ${sessionId}:`, error);
+    throw new Error("Failed to get session from database");
+  }
+}
+
+/**
+ * מוחק סשן
+ */
+export async function deleteSession(sessionId: string): Promise<boolean> {
+  try {
+    await connectToDatabase();
+    const result = await AnalysisSession.deleteOne({ sessionId });
+    return result.deletedCount > 0;
+  } catch (error) {
+    console.error(`Error deleting session ${sessionId}:`, error);
+    throw new Error("Failed to delete session from database");
+  }
+}
+
+// פונקציה להתחברות למסד הנתונים
+async function connectToDatabase() {
+  if (mongoose.connection.readyState >= 1) {
+    return;
+  }
+
+  return mongoose.connect(MONGODB_URI);
+}

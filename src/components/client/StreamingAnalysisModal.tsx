@@ -52,172 +52,161 @@ export default function StreamingAnalysisModal({
   const geminiRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef<number>(0);
+  const MAX_RECONNECT_ATTEMPTS = 3;
 
   const handleStreamData = useCallback(
     (data: StreamingData) => {
-      // Reset the timeout on each data packet
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-        timeoutRef.current = setTimeout(() => {
-          if (!isComplete && !hasError) {
-            setHasError(true);
-            setStatus("תם הזמן להשלמת הניתוח. אנא נסה שוב מאוחר יותר.");
-            if (eventSourceRef.current) {
-              eventSourceRef.current.close();
-            }
-          }
-        }, 60000); // 1 minute of inactivity
-      }
-
+      // סיווג סוגי ההודעות מהשרת
       switch (data.type) {
-        case "status":
-          setStatus(data.message || "");
+        case "connected":
+          console.log("Stream connected:", data.message);
+          break;
+
+        case "progress":
           if (data.progress !== undefined) {
             setProgress(data.progress);
           }
           break;
 
-        case "chatgpt_start":
-          setChatgptStatus("running");
-          setStatus("ChatGPT מנתח את המיזם...");
-          break;
-
         case "chatgpt_chunk":
-          setChatgptStatus("running");
-          setChatgptContent(data.content || "");
+          if (data.content) {
+            setChatgptContent(data.content);
+            setChatgptStatus("running");
+          }
           if (data.progress !== undefined) {
             setProgress(data.progress);
           }
           break;
 
         case "chatgpt_complete":
-          setChatgptStatus("complete");
-          setChatgptContent(data.content || "");
-          break;
-
-        case "gemini_start":
-          setGeminiStatus("running");
-          setStatus("Gemini מנתח את המיזם...");
+          if (data.content) {
+            setChatgptContent(data.content);
+            setChatgptStatus("complete");
+          }
+          if (data.progress !== undefined) {
+            setProgress(data.progress);
+          }
           break;
 
         case "gemini_chunk":
-          setGeminiStatus("running");
-          setGeminiContent(data.content || "");
+          if (data.content) {
+            setGeminiContent(data.content);
+            setGeminiStatus("running");
+          }
           if (data.progress !== undefined) {
             setProgress(data.progress);
           }
           break;
 
         case "gemini_complete":
-          setGeminiStatus("complete");
-          setGeminiContent(data.content || "");
+          if (data.content) {
+            setGeminiContent(data.content);
+            setGeminiStatus("complete");
+          }
+          if (data.progress !== undefined) {
+            setProgress(data.progress);
+          }
           break;
 
-        case "complete":
-          setIsComplete(true);
-          setStatus("הניתוח הושלם בהצלחה!");
+        case "analysis_complete":
           setProgress(100);
-          if (eventSourceRef.current) {
-            eventSourceRef.current.close();
-          }
-          if (timeoutRef.current) {
-            clearTimeout(timeoutRef.current);
-          }
-
-          // Call onComplete with the analysis result
+          setIsComplete(true);
+          setChatgptStatus("complete");
+          setGeminiStatus("complete");
           if (data.result) {
             onComplete(data.result);
           }
+          setStatus("הניתוח הושלם בהצלחה");
           break;
 
         case "error":
+          console.error("Error from stream:", data.error);
           setHasError(true);
           setStatus(data.error || "שגיאה בניתוח");
-          if (eventSourceRef.current) {
-            eventSourceRef.current.close();
-          }
           break;
 
         default:
-          console.log("Unknown data type:", data.type);
+          console.log("Unknown message type:", data.type);
       }
     },
-    [
-      isComplete,
-      hasError,
-      onComplete,
-      setStatus,
-      setProgress,
-      setChatgptStatus,
-      setChatgptContent,
-      setGeminiStatus,
-      setGeminiContent,
-      setIsComplete,
-      setHasError,
-      timeoutRef,
-      eventSourceRef,
-    ]
+    [onComplete, setProgress, setStatus, setIsComplete, setHasError]
   );
 
-  // Use useCallback to memoize the startStreaming function
-  const startStreaming = useCallback(async () => {
+  const startStreaming = useCallback(() => {
+    if (!sessionId) return;
+
     try {
-      // No need to initialize, session already created
-      if (!sessionId) {
-        throw new Error("No session ID provided");
-      }
-
-      // First perform a HEAD request to check if the session is valid
-      const checkResponse = await fetch(
-        `/api/analyze/stream?sessionId=${sessionId}`,
-        {
-          method: "HEAD",
-          cache: "no-store",
-        }
-      );
-
-      if (!checkResponse.ok) {
-        throw new Error("Session has expired or is invalid");
-      }
-
-      // Set up the EventSource for streaming updates
+      // ניקוי eventSource קודם אם קיים
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
+        eventSourceRef.current = null;
       }
 
-      // Create EventSource with special URL parameter to prevent caching
-      const url = `/api/analyze/stream?sessionId=${sessionId}&_=${Date.now()}`;
+      // הגדרת פרמטר זמן כדי למנוע קאשינג של התשובה
+      const timestamp = Date.now();
 
-      // Create EventSource
-      const eventSource = new EventSource(url);
-      eventSourceRef.current = eventSource;
+      // בדיקת HEAD לוולידציה מקדימה של הסשן
+      fetch(`/api/analyze/stream?sessionId=${sessionId}&_=${timestamp}`, {
+        method: "HEAD",
+        cache: "no-store",
+        headers: {
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+        },
+      })
+        .then((headResponse) => {
+          if (!headResponse.ok) {
+            console.error("Session validation failed:", headResponse.status);
+            setHasError(true);
+            setStatus("שגיאה באימות מזהה הניתוח. אנא נסה שוב.");
+            return;
+          }
 
-      let reconnectAttempts = 0;
-      const MAX_RECONNECT_ATTEMPTS = 3;
+          // יצירת EventSource לאחר אימות הסשן עם מניעת קאשינג
+          const eventSource = new EventSource(
+            `/api/analyze/stream?sessionId=${sessionId}&_=${timestamp}`
+          );
+          eventSourceRef.current = eventSource;
 
-      eventSource.onmessage = (event) => {
-        try {
-          reconnectAttempts = 0; // Reset reconnect attempts on successful message
-          const data: StreamingData = JSON.parse(event.data);
-          handleStreamData(data);
-        } catch (e) {
-          console.error("Failed to parse streaming data:", e);
-        }
-      };
+          eventSource.onmessage = (event) => {
+            try {
+              reconnectAttemptsRef.current = 0; // איפוס ניסיונות החיבור מחדש בהצלחה
+              const data: StreamingData = JSON.parse(event.data);
+              handleStreamData(data);
+            } catch (e) {
+              console.error("Failed to parse streaming data:", e);
+            }
+          };
 
-      eventSource.onerror = (error) => {
-        console.error("EventSource error:", error);
-        reconnectAttempts++;
+          eventSource.onerror = (error) => {
+            console.error("EventSource error:", error);
+            reconnectAttemptsRef.current += 1;
 
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-          // Close the connection and don't try to reconnect after max attempts
-          eventSource.close();
+            if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+              // סגירת החיבור ללא ניסיונות נוספים לאחר מיצוי ניסיונות החיבור מחדש
+              if (eventSourceRef.current) {
+                eventSourceRef.current.close();
+                eventSourceRef.current = null;
+              }
+              setHasError(true);
+              setStatus(
+                "שגיאה בחיבור לשירות הניתוח לאחר מספר ניסיונות. אנא נסה שוב מאוחר יותר."
+              );
+            } else {
+              // אחרת, חכה רגע ונסה שוב
+              setTimeout(startStreaming, 2000);
+            }
+          };
+        })
+        .catch((error) => {
+          console.error("Error during session validation:", error);
           setHasError(true);
           setStatus(
-            "שגיאה בחיבור לשירות הניתוח לאחר מספר ניסיונות. אנא נסה שוב מאוחר יותר."
+            error instanceof Error
+              ? error.message
+              : "שגיאה בחיבור לשירות הניתוח"
           );
-        }
-      };
+        });
     } catch (error) {
       console.error("Streaming error:", error);
       setHasError(true);
@@ -225,7 +214,13 @@ export default function StreamingAnalysisModal({
         error instanceof Error ? error.message : "שגיאה בחיבור לשירות הניתוח"
       );
     }
-  }, [sessionId, handleStreamData, setHasError, setStatus]);
+  }, [
+    sessionId,
+    handleStreamData,
+    setHasError,
+    setStatus,
+    MAX_RECONNECT_ATTEMPTS,
+  ]);
 
   useEffect(() => {
     if (!isOpen) return;
