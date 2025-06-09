@@ -164,10 +164,9 @@ export async function handleLegacyRequest(body: LegacyFormData) {
 **זכור:** כל ציון חייב להיות מוצדק ומבוסס על איכות התוכן שסופק.
 `;
 
-  const aiResults = [];
   const engines = engine === "both" ? ["chatgpt", "gemini"] : [engine];
 
-  for (const eng of engines) {
+  const aiPromises = engines.map(async (eng) => {
     try {
       console.log(`Starting ${eng} analysis for legacy request...`);
       let analysis = "";
@@ -178,34 +177,27 @@ export async function handleLegacyRequest(body: LegacyFormData) {
         analysis = await runGeminiAnalysis(legacyPrompt);
       }
 
-      // חיפוש ציון בניתוח
       const scoreMatch = analysis.match(/ציון סופי[:\s]*(\d+)\/105/i);
       const extractedScore = scoreMatch ? parseInt(scoreMatch[1]) : null;
 
-      // אם לא נמצא ציון, השתמש בציון ברירת מחדל מבוסס אורך ואיכות התשובות
       let score = extractedScore;
       if (!score) {
-        // חישוב ציון בסיס לתשובות קצרות
         const problemScore = Math.min(15, problem.length / 10);
         const solutionScore = Math.min(15, solution.length / 10);
         const targetScore = Math.min(10, targetMarket.length / 8);
-        score = Math.round(problemScore + solutionScore + targetScore + 20); // +20 ציון בסיס
+        score = Math.round(problemScore + solutionScore + targetScore + 20);
       }
 
-      aiResults.push({
+      return {
         engine: eng,
         analysis,
         score: Math.min(score, 105),
         generatedAt: new Date(),
         tokensUsed: analysis.length,
-      });
-
-      console.log(
-        `${eng} analysis completed successfully with score: ${score}`
-      );
+      };
     } catch (error) {
       console.error(`Error with ${eng}:`, error);
-      aiResults.push({
+      return {
         engine: eng,
         analysis: `שגיאה בניתוח ${eng}: ${
           error instanceof Error ? error.message : "שגיאה לא ידועה"
@@ -213,9 +205,11 @@ export async function handleLegacyRequest(body: LegacyFormData) {
         score: 0,
         generatedAt: new Date(),
         tokensUsed: 0,
-      });
+      };
     }
-  }
+  });
+
+  const aiResults = await Promise.all(aiPromises);
 
   try {
     const venture = await Venture.findOne({ client_id: ventureData.client_id });

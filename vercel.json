@@ -4,10 +4,10 @@
   "framework": "nextjs",
   "functions": {
     "app/**/*.{js,ts,jsx,tsx}": {
-      "maxDuration": 30
+      "maxDuration": 300
     },
     "pages/**/*.{js,ts,jsx,tsx}": {
-      "maxDuration": 30
+      "maxDuration": 300
     }
   },
   "builds": [
