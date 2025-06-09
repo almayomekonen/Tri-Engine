@@ -1,8 +1,8 @@
+// ai-services.ts - גרסה מותאמת לפרודקשן
 function cleanAnalysisOutput(analysis: string): string {
   if (!analysis) return analysis;
 
   return analysis
-
     .replace(/<strong>(.*?)<\/strong>/g, "$1")
     .replace(/<b>(.*?)<\/b>/g, "$1")
     .replace(/<em>(.*?)<\/em>/g, "$1")
@@ -10,45 +10,48 @@ function cleanAnalysisOutput(analysis: string): string {
     .replace(/<u>(.*?)<\/u>/g, "$1")
     .replace(/<code>(.*?)<\/code>/g, "$1")
     .replace(/<pre>(.*?)<\/pre>/g, "$1")
-
     .replace(/<h[1-6]>(.*?)<\/h[1-6]>/g, "$1")
-
     .replace(/<ul>/g, "")
     .replace(/<\/ul>/g, "")
     .replace(/<ol>/g, "")
     .replace(/<\/ol>/g, "")
     .replace(/<li>(.*?)<\/li>/g, "- $1")
-
     .replace(/<a href="(.*?)">(.*?)<\/a>/g, "$2")
-
     .replace(/<[^>]*>/g, "")
-
     .replace(/\*\*(.*?)\*\*/g, "$1")
     .replace(/\*(.*?)\*/g, "$1")
     .replace(/__(.*?)__/g, "$1")
     .replace(/_(.*?)_/g, "$1")
     .replace(/`(.*?)`/g, "$1")
     .replace(/~~(.*?)~~/g, "$1")
-
     .replace(/^#{1,6}\s+/gm, "")
-
     .replace(/^\s*[-\*\+]\s+/gm, "- ")
     .replace(/^\s*\d+\.\s+/gm, "")
-
     .replace(/```[\s\S]*?```/g, "")
     .replace(/`([^`]+)`/g, "$1")
-
     .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1")
     .replace(/!\[([^\]]*)\]\([^\)]+\)/g, "$1")
-
     .replace(/\n\s*\n\s*\n/g, "\n\n")
     .replace(/^\s+|\s+$/gm, "")
     .trim();
 }
 
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  errorMessage: string
+): Promise<T> {
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]);
+}
+
 export async function runChatGPTAnalysis(prompt: string): Promise<string> {
-  const maxRetries = 3;
-  const baseDelay = 1000;
+  const maxRetries = 2; // הפחתה מ-3 ל-2
+  const baseDelay = 800; // הפחתה מ-1000
+  const analysisTimeout = 150000; // 2.5 דקות timeout
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -58,7 +61,7 @@ export async function runChatGPTAnalysis(prompt: string): Promise<string> {
         );
       }
 
-      const response = await fetch(
+      const requestPromise = fetch(
         "https://api.openai.com/v1/chat/completions",
         {
           method: "POST",
@@ -67,25 +70,31 @@ export async function runChatGPTAnalysis(prompt: string): Promise<string> {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "gpt-4o",
+            model: "gpt-4o-mini", // החלפה למודל מהיר יותר
             messages: [
               {
                 role: "system",
                 content:
-                  "אתה מומחה ניתוח עסקי מהדרג הגבוה ביותר המבצע ניתוח מדויק לפי מתודולוגיית Methodian Feasibility. אתה מקפיד על דיוק מתמטי מוחלט בחישוב ציונים ומתבסס אך ורק על הנתונים המסופקים. כל ציון שאתה נותן חייב להיות מוצדק ומבוסס על איכות התוכן בפועל. השב בטקסט רגיל ללא כל עיצוב, HTML או Markdown.",
+                  "אתה מומחה ניתוח עסקי המבצע ניתוח מהיר ומדויק לפי מתודולוגיית Methodian. השב בטקסט רגיל ללא עיצוב.",
               },
               {
                 role: "user",
                 content: prompt,
               },
             ],
-            max_tokens: 8000,
-            temperature: 0.1,
+            max_tokens: 4000, // הפחתה מ-8000
+            temperature: 0.2,
             top_p: 0.9,
             frequency_penalty: 0.1,
             presence_penalty: 0.1,
           }),
         }
+      );
+
+      const response = await withTimeout(
+        requestPromise,
+        analysisTimeout,
+        `ChatGPT analysis timeout after ${analysisTimeout / 1000} seconds`
       );
 
       if (response.status === 429) {
@@ -114,17 +123,25 @@ export async function runChatGPTAnalysis(prompt: string): Promise<string> {
         throw new Error("ChatGPT returned empty analysis");
       }
 
-      // ניקוי הפלט לטקסט נקי
       return cleanAnalysisOutput(analysis);
     } catch (error) {
+      console.error(`ChatGPT attempt ${attempt} failed:`, error);
+
       if (attempt === maxRetries) {
+        if (error instanceof Error && error.message.includes("timeout")) {
+          return `ניתוח ChatGPT הופסק בגלל timeout
+
+הניתוח לקח זמן רב מדי
+
+אנא נסה שוב עם פחות שאלות או עם מנוע יחיד.`;
+        }
+
         if (error instanceof Error && error.message.includes("rate limit")) {
           return `ניתוח ChatGPT זמנית לא זמין
 
 מערכת ChatGPT עמוסה כרגע
 
-הניתוח נוצר באמצעות Gemini Pro בלבד. 
-תוכל לנסות שוב מאוחר יותר לקבלת ניתוח משולב.`;
+תוכל לנסות שוב מאוחר יותר.`;
         }
 
         return `שגיאה בניתוח ChatGPT

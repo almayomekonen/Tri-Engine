@@ -1,26 +1,28 @@
+// app/api/analyze/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import dbConnect from "@/lib/mongodb";
 import { Venture } from "@/lib/mongodb";
 import { isLegacyRequest, isQuestionnaireRequest } from "./types";
 import { handleLegacyRequest, handleQuestionnaireRequest } from "./handlers";
 
+// הגבלת זמן ל-4 דקות במקום 5 כדי להשאיר מרווח ביטחון
+const TIMEOUT_DURATION = 4 * 60 * 1000; // 4 דקות
+
 export async function POST(request: NextRequest) {
+  // יצירת timeout promise
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => {
+      reject(new Error("Analysis timeout after 4 minutes"));
+    }, TIMEOUT_DURATION);
+  });
+
   try {
     console.log("API route called, connecting to MongoDB...");
 
-    try {
-      await dbConnect();
-      console.log("MongoDB connection successful");
-    } catch (dbError) {
-      console.error("MongoDB connection failed:", dbError);
-      return NextResponse.json(
-        {
-          error: "שגיאה בחיבור למסד הנתונים",
-          details: dbError instanceof Error ? dbError.message : String(dbError),
-        },
-        { status: 500 }
-      );
-    }
+    // חיבור מהיר למסד נתונים עם timeout
+    const dbConnectPromise = dbConnect();
+    await Promise.race([dbConnectPromise, timeoutPromise]);
+    console.log("MongoDB connection successful");
 
     console.log("Parsing request body...");
     const body = await request.json();
@@ -33,39 +35,42 @@ export async function POST(request: NextRequest) {
         : "Unknown"
     );
 
+    let handlerPromise: Promise<NextResponse>;
+
     if (isLegacyRequest(body)) {
       console.log("Processing legacy request...");
-      return await handleLegacyRequest(body);
-    }
-
-    if (isQuestionnaireRequest(body)) {
+      handlerPromise = handleLegacyRequest(body);
+    } else if (isQuestionnaireRequest(body)) {
       console.log("Processing questionnaire request...");
-      try {
-        const response = await handleQuestionnaireRequest(body);
-        console.log("Questionnaire request processed successfully");
-        return response;
-      } catch (handlerError) {
-        console.error("Error in questionnaire handler:", handlerError);
-        return NextResponse.json(
-          {
-            error: "שגיאה בעיבוד השאלון",
-            details:
-              handlerError instanceof Error
-                ? handlerError.message
-                : String(handlerError),
-          },
-          { status: 500 }
-        );
-      }
+      handlerPromise = handleQuestionnaireRequest(body);
+    } else {
+      console.log("Invalid request format");
+      return NextResponse.json(
+        { error: "פורמט בקשה לא תקין - נדרש פורמט שאלון או פורמט קלאסי" },
+        { status: 400 }
+      );
     }
 
-    console.log("Invalid request format");
-    return NextResponse.json(
-      { error: "פורמט בקשה לא תקין - נדרש פורמט שאלון או פורמט קלאסי" },
-      { status: 400 }
-    );
+    // הרצה עם timeout
+    const response = await Promise.race([handlerPromise, timeoutPromise]);
+    console.log("Request processed successfully");
+    return response;
   } catch (error) {
     console.error("Analysis error:", error);
+
+    if (error instanceof Error && error.message.includes("timeout")) {
+      return NextResponse.json(
+        {
+          error: "זמן הניתוח עבר את המותר",
+          details:
+            "הניתוח לוקח זמן רב מדי. נסה להפחית את מספר השאלות או לבחור מנוע AI יחיד",
+          suggestion:
+            "אנא נסה שוב עם פחות שאלות או עם מנוע AI יחיד במקום כמה מנועים",
+        },
+        { status: 408 } // Request Timeout
+      );
+    }
+
     return NextResponse.json(
       {
         error: "שגיאה בניתוח",
