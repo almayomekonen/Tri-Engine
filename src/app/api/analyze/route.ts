@@ -17,7 +17,7 @@ export async function POST(request: NextRequest) {
   });
 
   try {
-    console.log("API route called, connecting to MongoDB...");
+    console.log("API route called, connecting to MongoDB.......");
 
     // חיבור מהיר למסד נתונים עם timeout
     const dbConnectPromise = dbConnect();
