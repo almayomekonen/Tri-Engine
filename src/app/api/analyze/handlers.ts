@@ -272,6 +272,8 @@ export async function handleLegacyRequest(body: LegacyFormData) {
   return NextResponse.json(response);
 }
 
+// Add this optimization to your handlers.ts
+
 export async function handleQuestionnaireRequest(body: QuestionnaireRequest) {
   const {
     businessName,
@@ -291,29 +293,18 @@ export async function handleQuestionnaireRequest(body: QuestionnaireRequest) {
   });
 
   if (!businessName || !email || !selectedQuestions?.length || !answers) {
-    console.error("Missing required fields:", {
-      hasBusiness: !!businessName,
-      hasEmail: !!email,
-      questionsCount: selectedQuestions?.length || 0,
-      hasAnswers: !!answers,
-    });
     return NextResponse.json(
       { error: "חסרים שדות חובה: שם עסק, אימייל, שאלות נבחרות ותשובות" },
       { status: 400 }
     );
   }
 
-  console.log("Creating venture data...");
+  // Create venture data
   const ventureData = {
     client_id: `CLIENT_${Date.now()}_${Math.random()
       .toString(36)
       .substr(2, 9)}`,
-    basicInfo: {
-      businessName,
-      email,
-      phone: phone || "",
-      city: city || "",
-    },
+    basicInfo: { businessName, email, phone: phone || "", city: city || "" },
     questionnaire: {},
     responses: {
       totalSelected: selectedQuestions.length,
@@ -325,29 +316,21 @@ export async function handleQuestionnaireRequest(body: QuestionnaireRequest) {
   };
 
   try {
-    console.log("Formatting questionnaire data...");
     ventureData.questionnaire = formatQuestionnaireData(
       selectedQuestions,
       answers
     );
-    console.log("Questionnaire data formatted successfully");
   } catch (formatError) {
     console.error("Error formatting questionnaire data:", formatError);
     return NextResponse.json(
-      {
-        error: "שגיאה בעיבוד נתוני השאלון",
-        details:
-          formatError instanceof Error
-            ? formatError.message
-            : String(formatError),
-      },
+      { error: "שגיאה בעיבוד נתוני השאלון" },
       { status: 500 }
     );
   }
 
+  // Save to database first
   let venture;
   try {
-    console.log("Creating and saving Venture document...");
     venture = new Venture(ventureData);
     await venture.save();
     console.log(
@@ -357,27 +340,20 @@ export async function handleQuestionnaireRequest(body: QuestionnaireRequest) {
   } catch (dbError) {
     console.error("Error saving venture to database:", dbError);
     return NextResponse.json(
-      {
-        error: "שגיאה בשמירת הנתונים במסד הנתונים",
-        details: dbError instanceof Error ? dbError.message : String(dbError),
-      },
+      { error: "שגיאה בשמירת הנתונים במסד הנתונים" },
       { status: 500 }
     );
   }
 
-  console.log("Preparing AI analysis...");
-  const aiResults = [];
-
-  // שימוש בפרומפט המעודכן והמפורט
+  // Build analysis prompt once
   const analysisPrompt = buildDetailedAnalysisPrompt({
     selectedQuestions,
     answers,
     businessName,
   });
 
-  console.log("Generated analysis prompt length:", analysisPrompt.length);
-
-  for (const engine of engines) {
+  // **OPTIMIZATION: Run AI analyses in parallel**
+  const aiPromises = engines.map(async (engine) => {
     try {
       console.log(`Starting ${engine} analysis...`);
       let analysis = "";
@@ -386,13 +362,11 @@ export async function handleQuestionnaireRequest(body: QuestionnaireRequest) {
         analysis = await runChatGPTAnalysis(analysisPrompt);
       } else if (engine === "gemini") {
         analysis = await runGeminiAnalysis(analysisPrompt);
-      } else if (engine === "perplexity") {
-        analysis = "ניתוח Perplexity זמין בקרוב";
       }
 
       console.log(`${engine} analysis completed successfully`);
 
-      // חיפוש ציון מדויק מהניתוח
+      // Extract score
       const maxScore = calculateMaxScore(selectedQuestions);
       const scoreRegex = new RegExp(
         `ציון סופי[:\\s]*(\\d+)\\/${maxScore}`,
@@ -401,30 +375,22 @@ export async function handleQuestionnaireRequest(body: QuestionnaireRequest) {
       const scoreMatch = analysis.match(scoreRegex);
       let extractedScore = scoreMatch ? parseInt(scoreMatch[1]) : null;
 
-      // אם לא נמצא ציון מדויק, השתמש בחישוב הפונקציה
       if (!extractedScore) {
         extractedScore = calculateVentureScore(selectedQuestions, answers);
-        console.log(
-          `Using calculated score for ${engine}: ${extractedScore}/${maxScore}`
-        );
-      } else {
-        console.log(
-          `Extracted score from ${engine} analysis: ${extractedScore}/${maxScore}`
-        );
       }
 
-      aiResults.push({
+      return {
         engine,
         analysis,
         score: extractedScore,
         maxScore,
         generatedAt: new Date(),
         tokensUsed: analysis.length,
-      });
+      };
     } catch (error) {
       console.error(`Error with ${engine}:`, error);
       const maxScore = calculateMaxScore(selectedQuestions);
-      aiResults.push({
+      return {
         engine,
         analysis: `שגיאה בניתוח ${engine}: ${
           error instanceof Error ? error.message : "שגיאה לא ידועה"
@@ -433,23 +399,16 @@ export async function handleQuestionnaireRequest(body: QuestionnaireRequest) {
         maxScore,
         generatedAt: new Date(),
         tokensUsed: 0,
-      });
+      };
     }
-  }
+  });
 
+  // **Wait for all AI analyses to complete in parallel**
+  const aiResults = await Promise.all(aiPromises);
+
+  // Calculate final scores and update database
   try {
-    console.log("Calculating scores and updating venture with results...");
-
-    // חישוב ציון מקסימלי מדויק
-    let maxScore;
-    try {
-      maxScore = calculateMaxScore(selectedQuestions);
-      console.log("Max score calculated:", maxScore);
-    } catch (scoreError) {
-      console.error("Error calculating max score:", scoreError);
-      maxScore = 105; // fallback to default max score
-    }
-
+    const maxScore = calculateMaxScore(selectedQuestions);
     const finalScore =
       aiResults.length > 0
         ? Math.round(
@@ -458,31 +417,18 @@ export async function handleQuestionnaireRequest(body: QuestionnaireRequest) {
         : 0;
 
     const breakdown = calculateDetailedScoring(selectedQuestions, answers);
-    console.log("Score breakdown calculated:", breakdown);
 
-    try {
-      venture.aiResults = aiResults;
-      venture.scoring = {
-        total: finalScore,
-        maxPossible: maxScore,
-        breakdown,
-        lastUpdated: new Date(),
-      };
-      venture.status = "analyzed";
+    venture.aiResults = aiResults;
+    venture.scoring = {
+      total: finalScore,
+      maxPossible: maxScore,
+      breakdown,
+      lastUpdated: new Date(),
+    };
+    venture.status = "analyzed";
 
-      await venture.save();
-      console.log("Venture updated successfully with analysis results");
-      console.log(`Final score: ${finalScore}/${maxScore}`);
-    } catch (updateError) {
-      console.error("Error updating venture document:", updateError);
-      throw new Error(
-        `Error updating venture: ${
-          updateError instanceof Error
-            ? updateError.message
-            : String(updateError)
-        }`
-      );
-    }
+    await venture.save();
+    console.log("Venture updated successfully with analysis results");
 
     const response = {
       ventureId: venture.venture_id,
@@ -493,26 +439,17 @@ export async function handleQuestionnaireRequest(body: QuestionnaireRequest) {
         acc[result.engine] = result.analysis;
         return acc;
       }, {} as Record<string, string>),
-      scoring: {
-        breakdown,
-      },
+      scoring: { breakdown },
       comprehensive:
         aiResults.length >= 2 ? generateComprehensiveAnalysis(aiResults) : null,
       savedAt: venture.updatedAt,
     };
 
-    console.log("Returning formatted response with accurate scoring");
     return NextResponse.json(response);
   } catch (updateError) {
     console.error("Error updating venture with results:", updateError);
     return NextResponse.json(
-      {
-        error: "שגיאה בעדכון תוצאות הניתוח",
-        details:
-          updateError instanceof Error
-            ? updateError.message
-            : String(updateError),
-      },
+      { error: "שגיאה בעדכון תוצאות הניתוח" },
       { status: 500 }
     );
   }

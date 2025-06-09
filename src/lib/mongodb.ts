@@ -1,5 +1,4 @@
 import mongoose from "mongoose";
-import crypto from "crypto";
 
 const MONGODB_URI = process.env.MONGODB_URI as string;
 
@@ -57,42 +56,6 @@ async function dbConnect() {
 export default dbConnect;
 
 import { Schema, model, models } from "mongoose";
-
-// Analysis Session interface and model for streaming analysis
-interface IAnalysisSession {
-  sessionId: string;
-  prompt: string;
-  progress: number;
-  chatgptContent: string;
-  geminiContent: string;
-  isComplete: boolean;
-  businessName: string;
-  createdAt: Date;
-  expiresAt: Date;
-}
-
-const AnalysisSessionSchema = new Schema<IAnalysisSession>(
-  {
-    sessionId: { type: String, required: true, unique: true },
-    prompt: { type: String, required: true },
-    progress: { type: Number, default: 0 },
-    chatgptContent: { type: String, default: "" },
-    geminiContent: { type: String, default: "" },
-    isComplete: { type: Boolean, default: false },
-    businessName: { type: String, required: true },
-    createdAt: { type: Date, default: Date.now },
-    expiresAt: { type: Date, required: true },
-  },
-  { timestamps: true }
-);
-
-// Add index for faster lookup and automatic expiration
-AnalysisSessionSchema.index({ createdAt: 1 });
-AnalysisSessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-
-const AnalysisSession =
-  models.AnalysisSession ||
-  model<IAnalysisSession>("AnalysisSession", AnalysisSessionSchema);
 
 interface IQuestionResponse {
   selected: boolean;
@@ -257,13 +220,11 @@ const VentureSchema = new Schema<IVenture>(
   }
 );
 
-// אינדקסים לביצועים (ללא venture_id כי זה כבר unique למעלה)
 VentureSchema.index({ client_id: 1 });
 VentureSchema.index({ "basicInfo.email": 1 });
 VentureSchema.index({ status: 1 });
 VentureSchema.index({ createdAt: -1 });
 
-// Virtual לחישוב התקדמות
 VentureSchema.virtual("progressPercentage").get(function () {
   return Math.round(
     (this.responses.totalSelected / this.responses.totalAvailable) * 100
@@ -272,109 +233,5 @@ VentureSchema.virtual("progressPercentage").get(function () {
 
 const Venture = models.Venture || model<IVenture>("Venture", VentureSchema);
 
-export { Venture, AnalysisSession };
-export type {
-  IVenture,
-  IAIResult,
-  IScoring,
-  IQuestionResponse,
-  IAnalysisSession,
-};
-
-/**
- * יוצר סשן חדש במסד הנתונים
- */
-export async function createSession(data: {
-  prompt: string;
-  businessName: string;
-  progress: number;
-  isComplete: boolean;
-  createdAt: Date;
-}): Promise<string> {
-  try {
-    await connectToDatabase();
-
-    const sessionId = crypto.randomUUID();
-
-    // יצירת תאריך תפוגה - 24 שעות מעכשיו
-    const expiresAt = new Date();
-    expiresAt.setHours(expiresAt.getHours() + 24);
-
-    const session = new AnalysisSession({
-      sessionId,
-      ...data,
-      expiresAt, // הוספת שדה התפוגה הנדרש
-    });
-
-    await session.save();
-    return sessionId;
-  } catch (error) {
-    console.error("Error creating session:", error);
-    throw new Error("Failed to create session in database");
-  }
-}
-
-/**
- * מעדכן סשן קיים
- */
-export async function updateSession(
-  sessionId: string,
-  updates: Partial<{
-    progress: number;
-    chatgptContent: string;
-    geminiContent: string;
-    isComplete: boolean;
-  }>
-): Promise<boolean> {
-  try {
-    await connectToDatabase();
-
-    const result = await AnalysisSession.updateOne(
-      { sessionId },
-      { $set: updates }
-    );
-
-    return result.modifiedCount > 0;
-  } catch (error) {
-    console.error(`Error updating session ${sessionId}:`, error);
-    throw new Error("Failed to update session in database");
-  }
-}
-
-/**
- * מחזיר את נתוני הסשן לפי מזהה
- */
-export async function getSession(
-  sessionId: string
-): Promise<IAnalysisSession | null> {
-  try {
-    await connectToDatabase();
-    return await AnalysisSession.findOne({ sessionId });
-  } catch (error) {
-    console.error(`Error getting session ${sessionId}:`, error);
-    throw new Error("Failed to get session from database");
-  }
-}
-
-/**
- * מוחק סשן
- */
-export async function deleteSession(sessionId: string): Promise<boolean> {
-  try {
-    await connectToDatabase();
-    const result = await AnalysisSession.deleteOne({ sessionId });
-    return result.deletedCount > 0;
-  } catch (error) {
-    console.error(`Error deleting session ${sessionId}:`, error);
-    throw new Error("Failed to delete session from database");
-  }
-}
-
-// פונקציה להתחברות למסד הנתונים
-async function connectToDatabase() {
-  if (mongoose.connection.readyState >= 1) {
-    return;
-  }
-
-  return mongoose.connect(MONGODB_URI);
-}
+export { Venture };
+export type { IVenture, IAIResult, IScoring, IQuestionResponse };

@@ -364,80 +364,133 @@ export function calculateDetailedScoring(
     momTest: 0,
   };
 
-  // ציון מדויק לפי קטגוריות בהתבסס על תוכן התשובות
   selectedQuestions.forEach((qId) => {
     const answer = answers[qId];
     if (!answer || answer.trim().length < 20) return;
 
-    // ציון איכות בהתבסס על אורך ותוכן
     const question = FULL_QUESTIONNAIRE_DATA.flatMap(
       (cat) => cat.questions
     ).find((q) => q.id === qId);
 
     if (!question) return;
 
+    // Calculate quality score based on content depth and priority
     let qualityScore = 0;
-    if (answer.length >= 50) qualityScore += 1;
-    if (answer.length >= 150) qualityScore += 1;
-    if (answer.length >= 300) qualityScore += 1;
+    if (answer.length >= 50) qualityScore += 1.5;
+    if (answer.length >= 150) qualityScore += 1.5;
+    if (answer.length >= 300) qualityScore += 2;
 
-    // בונוס לתוכן איכותי
-    const qualityWords = ["ניסיון", "נתונים", "מחקר", "לקוחות", "מכירות"];
-    if (qualityWords.some((word) => answer.includes(word))) qualityScore += 1;
+    // Bonus for quality content indicators
+    const qualityWords = [
+      "ניסיון",
+      "נתונים",
+      "מחקר",
+      "לקוחות",
+      "מכירות",
+      "תשלום",
+      "מודל",
+      "תחרות",
+      "שוק",
+      "פתרון",
+      "בעיה",
+      "יתרון",
+      "הכנסות",
+      "צמיחה",
+    ];
+    const hasQualityContent = qualityWords.some((word) =>
+      answer.toLowerCase().includes(word.toLowerCase())
+    );
+    if (hasQualityContent) qualityScore += 1;
 
-    // משקל עדיפות
+    // Priority multiplier - reduced to avoid exceeding limits
     const priorityMultiplier =
       question.priority === "high"
         ? 1.5
         : question.priority === "medium"
         ? 1.2
-        : 1;
+        : 1.0;
 
     const finalScore = qualityScore * priorityMultiplier;
 
-    // חלוקה לפי קטגוריות
+    // Map to categories - reduced multipliers to stay within MongoDB limits
     if (qId.startsWith("A") || qId.startsWith("F")) {
-      scoring.teamCapability += finalScore * 0.8;
-    } else if (qId.startsWith("C")) {
-      scoring.problemClarity += finalScore * 0.6;
-      scoring.solutionDifferentiation += finalScore * 0.4;
-    } else if (qId.startsWith("E")) {
-      scoring.tamSamSom += finalScore * 0.4;
-      scoring.marketTiming += finalScore * 0.3;
-      scoring.competitorAwareness += finalScore * 0.3;
-    } else if (
-      qId.startsWith("E") &&
-      (qId.includes("6") || qId.includes("7"))
-    ) {
-      scoring.businessModel += finalScore;
-    } else if (qId.startsWith("D")) {
-      scoring.momTest += finalScore * 0.6;
-      scoring.crossValidation += finalScore * 0.4;
-    } else if (qId.startsWith("B")) {
-      scoring.swotRisk += finalScore * 0.5;
+      scoring.teamCapability += finalScore * 0.6;
+    }
+
+    if (qId.startsWith("C")) {
+      scoring.problemClarity += finalScore * 0.5;
+      scoring.solutionDifferentiation += finalScore * 0.3;
+    }
+
+    if (qId.startsWith("E")) {
+      if (qId.includes("1") || qId.includes("2") || qId.includes("8")) {
+        scoring.tamSamSom += finalScore * 0.4;
+      }
+      if (qId.includes("3") || qId.includes("4")) {
+        scoring.competitorAwareness += finalScore * 0.5;
+      }
+      if (qId.includes("5") || qId.includes("6") || qId.includes("7")) {
+        // Reduced multiplier to stay within businessModel limit of 10
+        scoring.businessModel += finalScore * 0.4;
+      }
+      scoring.marketTiming += finalScore * 0.2;
+    }
+
+    if (qId.startsWith("D")) {
+      scoring.momTest += finalScore * 0.3;
+      scoring.crossValidation += finalScore * 0.2;
+    }
+
+    if (qId.startsWith("B")) {
+      // Reduced multiplier to stay within swotRisk limit of 5
+      scoring.swotRisk += finalScore * 0.3;
+    }
+
+    if (qId.startsWith("G")) {
+      scoring.teamCapability += finalScore * 0.3;
     }
   });
 
-  // הגבלה לציונים מקסימליים
-  scoring.teamCapability = Math.min(15, Math.round(scoring.teamCapability));
-  scoring.problemClarity = Math.min(10, Math.round(scoring.problemClarity));
-  scoring.solutionDifferentiation = Math.min(
-    10,
-    Math.round(scoring.solutionDifferentiation)
+  // Apply MongoDB schema limits - MUST match your database schema exactly
+  const mongoLimits = {
+    teamCapability: 15,
+    problemClarity: 10,
+    solutionDifferentiation: 10,
+    tamSamSom: 10,
+    marketTiming: 10,
+    competitorAwareness: 10,
+    businessModel: 10, // MongoDB schema limit is 10, not 20!
+    porterForces: 5,
+    swotRisk: 5, // MongoDB schema limit is 5, not 10!
+    crossValidation: 5,
+    academicSources: 5,
+    visualsData: 5,
+    momTest: 5,
+  };
+
+  // Apply strict limits and round
+  Object.keys(scoring).forEach((key) => {
+    const categoryKey = key as keyof typeof scoring;
+    const maxLimit = mongoLimits[categoryKey];
+    scoring[categoryKey] = Math.min(Math.round(scoring[categoryKey]), maxLimit);
+  });
+
+  // Ensure minimum realistic scores for answered categories (but within limits)
+  const answeredCategories = new Set(
+    selectedQuestions.map((qId) => qId.charAt(0))
   );
-  scoring.tamSamSom = Math.min(10, Math.round(scoring.tamSamSom));
-  scoring.marketTiming = Math.min(10, Math.round(scoring.marketTiming));
-  scoring.competitorAwareness = Math.min(
-    10,
-    Math.round(scoring.competitorAwareness)
-  );
-  scoring.businessModel = Math.min(10, Math.round(scoring.businessModel));
-  scoring.porterForces = Math.min(5, Math.round(scoring.porterForces));
-  scoring.swotRisk = Math.min(5, Math.round(scoring.swotRisk));
-  scoring.crossValidation = Math.min(5, Math.round(scoring.crossValidation));
-  scoring.academicSources = Math.min(5, Math.round(scoring.academicSources));
-  scoring.visualsData = Math.min(5, Math.round(scoring.visualsData));
-  scoring.momTest = Math.min(5, Math.round(scoring.momTest));
+
+  if (answeredCategories.has("E")) {
+    scoring.businessModel = Math.max(scoring.businessModel, 2);
+  }
+
+  if (answeredCategories.has("C")) {
+    scoring.problemClarity = Math.max(scoring.problemClarity, 2);
+    scoring.solutionDifferentiation = Math.max(
+      scoring.solutionDifferentiation,
+      2
+    );
+  }
 
   return scoring;
 }

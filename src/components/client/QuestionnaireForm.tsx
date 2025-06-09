@@ -252,7 +252,6 @@ export default function PerfectQuestionnaireForm({
       console.error("Submit error:", error);
     }
   };
-
   const toggleSmartMode = () => {
     setSmartMode(!smartMode);
     if (!smartMode) {

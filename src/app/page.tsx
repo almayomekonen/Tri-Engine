@@ -4,7 +4,7 @@ import { useState } from "react";
 import ResearchForm from "@/components/client/ResearchForm";
 import PerfectQuestionnaireForm from "@/components/client/QuestionnaireForm";
 import EnhancedResultDisplay from "@/components/client/ResultDisplay";
-import StreamingAnalysisModal from "@/components/client/StreamingAnalysisModal";
+
 import MethodologyInfo from "@/components/server/MethodologyInfo";
 import PageHeader from "@/components/ui/PageHeader";
 import { GlobalStyles } from "@/components/ui/styles";
@@ -46,12 +46,6 @@ export default function Home() {
   const [detailedResult, setDetailedResult] = useState<
     DetailedAnalysisResult | undefined
   >(undefined);
-
-  // State for streaming analysis
-  const [showStreamingModal, setShowStreamingModal] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [formDataForStreaming, setFormDataForStreaming] =
-    useState<QuestionnaireFormData | null>(null);
 
   // Handle legacy form submission (simple mode)
   const handleSimpleSubmit = async (formData: FormData) => {
@@ -101,9 +95,33 @@ export default function Home() {
 
   const handleQuestionnaireSubmit = async (formData: QuestionnaireFormData) => {
     setLoading(true);
-    setFormDataForStreaming(formData);
+    setActiveMode("results");
+
+    // Enhanced loading stages with realistic timing
+    const stages = [
+      { text: "מעבד נתוני השאלון...", duration: 1000 },
+      { text: "מכין פרומפט מותאם אישית...", duration: 2000 },
+      { text: "שולח לניתוח ChatGPT-4...", duration: 15000 },
+      { text: "מנתח עם Gemini Pro...", duration: 15000 },
+      { text: "מחשב ציונים מפורטים...", duration: 3000 },
+      { text: "יוצר ניתוח משולב...", duration: 2000 },
+      { text: "שומר תוצאות במסד נתונים...", duration: 1000 },
+      { text: "מכין תצוגה סופית...", duration: 1000 },
+    ];
+
+    let currentStage = 0;
+
+    // Start the loading progression
+    const progressInterval = setInterval(() => {
+      if (currentStage < stages.length - 1) {
+        currentStage++;
+        setAnalysisStage(stages[currentStage].text);
+      }
+    }, 5000); // Change stage every 5 seconds
 
     try {
+      setAnalysisStage(stages[0].text);
+
       console.log("Submitting questionnaire form data:", {
         businessName: formData.businessName,
         email: formData.email,
@@ -111,8 +129,7 @@ export default function Home() {
         engines: formData.engines,
       });
 
-      // Start streaming analysis
-      const response = await fetch("/api/analyze/stream", {
+      const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(formData),
@@ -127,13 +144,27 @@ export default function Home() {
       }
 
       const data = await response.json();
-      console.log(
-        "Started streaming analysis with session ID:",
-        data.sessionId
-      );
+      console.log("Analysis completed successfully:", data);
 
-      setSessionId(data.sessionId);
-      setShowStreamingModal(true);
+      // Set results
+      setDetailedResult({
+        ventureId: data.ventureId,
+        score: data.score,
+        maxScore: data.maxScore,
+        progressPercentage: data.progressPercentage,
+        results: data.results,
+        scoring: data.scoring,
+        comprehensive: data.comprehensive,
+        savedAt: new Date(),
+      });
+
+      setResult({
+        gemini: data.results?.gemini || null,
+        chatgpt: data.results?.chatgpt || null,
+        comprehensive: data.comprehensive || null,
+      });
+
+      setAnalysisStage("ניתוח הושלם בהצלחה! 🎉");
     } catch (error) {
       console.error("Error in questionnaire submission:", error);
       alert(
@@ -141,26 +172,11 @@ export default function Home() {
           error instanceof Error ? error.message : String(error)
         }`
       );
+      setActiveMode("advanced");
     } finally {
-      // We'll keep loading true until the streaming analysis is complete
+      clearInterval(progressInterval);
+      setLoading(false);
     }
-  };
-
-  // Handler for when streaming analysis completes
-  const handleStreamingComplete = (streamingResult: DetailedAnalysisResult) => {
-    setLoading(false);
-    setShowStreamingModal(false);
-    setActiveMode("results");
-
-    setDetailedResult(streamingResult);
-    setResult({
-      gemini: streamingResult.results.gemini || null,
-      chatgpt: streamingResult.results.chatgpt || null,
-      comprehensive: streamingResult.comprehensive,
-    });
-
-    // Clear local storage after successful analysis
-    localStorage.removeItem("methodian_draft");
   };
 
   const TabButton = ({
@@ -443,20 +459,6 @@ export default function Home() {
           </div>
         </div>
       </div>
-
-      {/* Streaming Analysis Modal */}
-      {showStreamingModal && sessionId && formDataForStreaming && (
-        <StreamingAnalysisModal
-          isOpen={showStreamingModal}
-          onClose={() => {
-            setShowStreamingModal(false);
-            setLoading(false);
-          }}
-          sessionId={sessionId}
-          businessName={formDataForStreaming.businessName}
-          onComplete={handleStreamingComplete}
-        />
-      )}
 
       <GlobalStyles />
     </main>

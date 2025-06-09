@@ -77,7 +77,7 @@ export default function MethodologyInfo() {
           </div>
           <div className="flex items-center justify-between p-2 bg-gray-800/50 rounded">
             <span>Gemini Pro</span>
-            <span className="text-yellow-400">⚠ בבדיקה</span>
+            <span className="text-yellow-400">✓ פעיל</span>
           </div>
           <div className="flex items-center justify-between p-2 bg-gray-800/50 rounded">
             <span>ניתוח משולב</span>
